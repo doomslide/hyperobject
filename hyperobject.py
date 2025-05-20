@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from typing import List, Dict, Tuple, Any
+from dataclasses import dataclass, asdict
 import matplotlib.pyplot as plt
 import torch
 from torch.nn import functional as F
@@ -15,6 +16,14 @@ prompts_file_path ="prompts.csv"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+@dataclass
+class TokenMetric:
+    prompt: str
+    model_name: str
+    token_number: int  # Absolute index of the token in the generated sequence
+    entropy: float
+    varentropy: float
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate and compare language models.")
@@ -69,7 +78,7 @@ def generate_and_compute_metrics(
     max_tokens: int,
     step_size: int,
     model_name: str
-) -> List[Dict[str, Any]]:
+) -> List[TokenMetric]:
     metrics = []
     input_ids = tokenizer.encode(prompt, return_tensors="pt")
     attention_mask = torch.ones_like(input_ids)  # Create attention mask
@@ -107,16 +116,14 @@ def generate_and_compute_metrics(
         entropy = entropy[valid_indices]
         varentropy = varentropy[valid_indices]
         if entropy.numel() > 0 and varentropy.numel() > 0:
-            base_metric = {
-                "prompt": prompt,
-                "model": model_name,
-            }
-            metrics.extend({
-                **base_metric,
-                "prompt #": i + step,
-                "entropy": e.item(),
-                "varentropy": v.item()
-            } for i, (e, v) in enumerate(zip(entropy, varentropy)))
+            for i, (e, v) in enumerate(zip(entropy, varentropy)):
+                metrics.append(TokenMetric(
+                    prompt=prompt,
+                    model_name=model_name,
+                    token_number=step + i, # Absolute token index
+                    entropy=e.item(),
+                    varentropy=v.item()
+                ))
         
         input_ids = outputs.sequences
         logger.debug(f"Updated input_ids shape: {input_ids.shape}")
@@ -155,70 +162,73 @@ def plot_metrics(metrics_by_model: Dict[str, List[Dict[str, float]]]):
     plt.draw()
     plt.pause(0.001)
 
-def print_debug_info(metrics_by_model: Dict[str, List[Dict[str, float]]]):
+def print_debug_info(metrics_by_model: Dict[str, List[TokenMetric]]):
     for model_name, metrics in metrics_by_model.items():
         logger.info(f"Debug info for {model_name}:")
         logger.info(f"Number of metrics: {len(metrics)}")
         if metrics:
-            logger.info(f"First metric: {metrics[0]}")
-            logger.info(f"Last metric: {metrics[-1]}")
+            logger.info(f"First metric: {asdict(metrics[0])}")
+            logger.info(f"Last metric: {asdict(metrics[-1])}")
         else:
             logger.info("No metrics available")
         logger.info("---")
 
-def save_results(metrics_by_model: Dict[str, List[Dict[str, Any]]], logs_dir: str, batch_num: int):
+def save_results(metrics_by_model: Dict[str, List[TokenMetric]], logs_dir: str, batch_num: int):
     os.makedirs(logs_dir, exist_ok=True)
     file_path = os.path.join(logs_dir, f"metrics_results_batch_{batch_num}.json")
     
     organized_metrics = {}
     for model_name, metrics in metrics_by_model.items():
         for metric in metrics:
-            prompt = metric['prompt']
+            prompt = metric.prompt
             if prompt not in organized_metrics:
                 organized_metrics[prompt] = {}
             if model_name not in organized_metrics[prompt]:
                 organized_metrics[prompt][model_name] = {
-                    'entropy': [],
-                    'varentropy': []
+                    'metrics': []
                 }
-            organized_metrics[prompt][model_name]['entropy'].append(metric['entropy'])
-            organized_metrics[prompt][model_name]['varentropy'].append(metric['varentropy'])
+            metric_dict = asdict(metric)
+            organized_metrics[prompt][model_name]['metrics'].append({
+                'token_number': metric_dict['token_number'],
+                'entropy': metric_dict['entropy'],
+                'varentropy': metric_dict['varentropy']
+            })
     
+    for prompt_data in organized_metrics.values():
+        for model_data in prompt_data.values():
+            model_data['metrics'].sort(key=lambda x: x['token_number'])
+
     with open(file_path, 'w') as f:
         json.dump(organized_metrics, f, indent=2)
     logger.info(f"Results for batch {batch_num} saved to {file_path}")
 
     csv_file_path = os.path.join(logs_dir, f"metrics_results_batch_{batch_num}.csv")
     with open(csv_file_path, 'w', newline='') as csvfile:
-        fieldnames = ['prompt', 'model', 'token_number', 'entropy', 'varentropy']
+        fieldnames = ['prompt', 'model_name', 'token_number', 'entropy', 'varentropy']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        for prompt, models in organized_metrics.items():
-            for model, data in models.items():
-                for i, (entropy, varentropy) in enumerate(zip(data['entropy'], data['varentropy'])):
-                    writer.writerow({
-                        'prompt': prompt,
-                        'model': model,
-                        'token_number': i,
-                        'entropy': entropy,
-                        'varentropy': varentropy
-                    })
+        for model_name, model_metrics_list in metrics_by_model.items():
+            for token_metric in model_metrics_list:
+                writer.writerow(asdict(token_metric))
     logger.info(f"CSV results for batch {batch_num} saved to {csv_file_path}")
 
-def update_plot(metrics_by_model: Dict[str, List[Dict[str, float]]], fig, ax):
+def update_plot(
+    metrics_by_model: Dict[str, List[TokenMetric]],
+    fig,
+    ax
+):
     ax.clear()
     for model_name, metrics in metrics_by_model.items():
-        # Extract valid entropy and varentropy values
         entropies = []
         varentropies = []
         for m in metrics:
             try:
-                e, v = float(m["entropy"]), float(m["varentropy"])
+                e, v = m.entropy, m.varentropy
                 if not (math.isnan(e) or math.isinf(e) or math.isnan(v) or math.isinf(v)):
                     entropies.append(e)
                     varentropies.append(v)
             except (ValueError, TypeError):
-                pass # Ignore metrics that can't be converted to float
+                pass
         
         if entropies and varentropies:
             ax.scatter(entropies, varentropies, label=model_name, alpha=0.7)
@@ -243,7 +253,14 @@ def main():
         json.dump(vars(args), f, indent=2)
     logger.info(f"Run configuration saved to {config_path}")
     
-    model_names = ["gpt2", "HuggingFaceTB/SmolLM-135M", "HuggingFaceTB/SmolLM-360M", "meta-llama/Llama-3.2-1B-Instruct"] 
+    model_names = [
+        "gpt2",
+        "distilgpt2",
+        "HuggingFaceTB/SmolLM-135M",
+        # "HuggingFaceTB/SmolLM-360M",
+        # "meta-llama/Llama-3.2-1B-Instruct",
+        # "microsoft/phi-2"
+    ]
     
     models_and_tokenizers = load_models_and_tokenizers(model_names, args.cache_dir)
     
@@ -260,10 +277,10 @@ def main():
         for model_name, (model, tokenizer) in models_and_tokenizers.items():
             logger.info(f"Processing batch {batch_num + 1} for model: {model_name}")
             for prompt in tqdm(batch_prompts, desc=f"Generating with {model_name}"):
-                metrics = generate_and_compute_metrics(
+                generated_metrics = generate_and_compute_metrics(
                     model_name=model_name, model=model, tokenizer=tokenizer, prompt=prompt, step_size=args.step_size, max_tokens=args.max_tokens
                 )
-                metrics_by_model[model_name].extend(metrics)
+                metrics_by_model[model_name].extend(generated_metrics)
             
             print_debug_info(metrics_by_model)
             
