@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate and compare language models.")
-    parser.add_argument("--cache_dir", type=str, help="Directory to cache models")
+    parser.add_argument("--cache_dir", type=str, default="./cache", help="Directory to cache models")
     parser.add_argument("--max_tokens", type=int, default=200, help="Maximum number of tokens to generate per prompt")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for prompt processing")
     parser.add_argument("--step_size", type=int, default=200, help="Number of tokens to generate per step")
@@ -208,23 +208,23 @@ def save_results(metrics_by_model: Dict[str, List[Dict[str, Any]]], logs_dir: st
 def update_plot(metrics_by_model: Dict[str, List[Dict[str, float]]], fig, ax):
     ax.clear()
     for model_name, metrics in metrics_by_model.items():
+        # Extract valid entropy and varentropy values
         entropies = []
-        normalized_varentropies = []
+        varentropies = []
         for m in metrics:
             try:
                 e, v = float(m["entropy"]), float(m["varentropy"])
-                if not (math.isnan(e) or math.isinf(e) or math.isnan(v) or math.isinf(v)) and e != 0:
+                if not (math.isnan(e) or math.isinf(e) or math.isnan(v) or math.isinf(v)):
                     entropies.append(e)
-                    print(e, v)
-                    normalized_varentropies.append(math.log(e/math.sqrt(v)))
+                    varentropies.append(v)
             except (ValueError, TypeError):
-                pass
+                pass # Ignore metrics that can't be converted to float
         
-        if entropies and normalized_varentropies:
-            ax.scatter(entropies, normalized_varentropies, label=model_name, alpha=0.7)
+        if entropies and varentropies:
+            ax.scatter(entropies, varentropies, label=model_name, alpha=0.7)
 
     ax.set_xlabel("Entropy")
-    ax.set_ylabel("log(Entropy/sqrt(Varentropy))")
+    ax.set_ylabel("Varentropy")
     ax.set_title("Hyperobject")
     ax.legend()
     ax.grid(True, linestyle='--', alpha=0.7)
